@@ -151,6 +151,21 @@ require("ts_willrename").setup({ silent_apply = true })
 require("ts_willrename").rename()
 ```
 
+## nvim-tree integration
+
+Bind TS-aware rename to `r` in nvim-tree:
+
+```lua
+{
+  "nvim-tree/nvim-tree.lua",
+  opts = function(_, opts)
+    require("ts_willrename.integrations.nvim_tree").setup({
+      extensions = { "ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs" }, -- optional filter
+    })
+    return opts
+  end,
+}
+
 ---
 
 ## License

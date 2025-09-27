@@ -15,7 +15,7 @@ local cfg = {
   autosave          = false,
   wipe_unlisted     = false,
   notify_did_rename = true,
-  respect_root      = "warn",   -- "warn" | "error" | true(=warn) | false
+  respect_root      = "warn",
   encoding          = "utf-16",
 }
 
@@ -62,15 +62,173 @@ local function uris_from_edit(edit)
   return uris
 end
 
+-- Safe starts_with for older Neovim
+local function starts_with(s, prefix)
+  if vim.startswith then return vim.startswith(s, prefix) end
+  return type(s) == "string" and s:sub(1, #prefix) == prefix
+end
+
+-- Resolve real path (fixes symlinks / Windows case issues)
+local function realpath(p)
+  local r = p and vim.loop.fs_realpath(p) or nil
+  return r or p
+end
+
+-- Pick LSP clients whose root_dir covers the given absolute path
+local function clients_for_path(abs_path)
+  abs_path = norm_path(abs_path or "")
+  if abs_path == "" then return {} end
+  local out = {}
+  for _, c in ipairs(vim.lsp.get_clients() or {}) do
+    local root = c.config and c.config.root_dir and norm_path(c.config.root_dir) or nil
+    if root and starts_with(abs_path, root) then
+      table.insert(out, c)
+    end
+  end
+  return out
+end
+
+-- Ensure a file is loaded in a hidden buffer so tsserver can "see" it
+local function ensure_buf_loaded_for_path(abs_path)
+  local bufnr = vim.fn.bufadd(abs_path)
+  vim.fn.bufload(bufnr)
+  pcall(vim.api.nvim_buf_set_option, bufnr, "buflisted", false)
+  -- If filetype is empty, set it from filename to trigger LSP attach where needed
+  if vim.bo[bufnr].filetype == "" then
+    local ft = vim.filetype.match({ filename = abs_path }) or ""
+    if ft ~= "" then
+      vim.bo[bufnr].filetype = ft
+      vim.api.nvim_exec_autocmds("FileType", { buffer = bufnr })
+    end
+  end
+  return bufnr
+end
+
+-- Optionally wait for a client covering this path to attach (max ~800ms)
+local function wait_clients_for_path(abs_path, timeout_ms)
+  timeout_ms = timeout_ms or 800
+  return vim.wait(timeout_ms, function()
+    return #clients_for_path(abs_path) > 0
+  end, 50)
+end
+
+-- Lazily load plugins that may be required when called from nvim-tree
+local function preload_plugins()
+  if package.loaded["lazy"] then
+    pcall(require("lazy").load, { plugins = {
+      "nvim-ts-willrename",
+      "typescript-tools.nvim",
+      "nvim-lsp-file-operations",
+    }})
+  end
+end
+
+local function wait_clients_for_path(abs_path, timeout_ms)
+  timeout_ms = timeout_ms or 800
+  return vim.wait(timeout_ms, function()
+    return #clients_for_path(abs_path) > 0
+  end, 50)
+end
+
+local function starts_with(s, prefix)
+  if vim.startswith then return vim.startswith(s, prefix) end
+  return s:sub(1, #prefix) == prefix
+end
+
+local function clients_for_path(abs_path)
+  abs_path = norm_path(abs_path or "")
+  if abs_path == "" then return {} end
+
+  local out = {}
+  for _, c in ipairs(vim.lsp.get_clients() or {}) do
+    local root = c.config and c.config.root_dir and norm_path(c.config.root_dir) or nil
+    if root and starts_with(abs_path, root) then
+      table.insert(out, c)
+    end
+  end
+  return out
+end
+
 -- request willRenameFiles from all clients; apply edits; return touched buffers
 local function will_rename(old_abs, new_abs, done)
-  local params = { files = { { oldUri = vim.uri_from_fname(old_abs), newUri = vim.uri_from_fname(new_abs) } } }
-  local any, pending = false, 0
-  local touched = {}
+  preload_plugins()
 
-  local clients = vim.lsp.get_clients({ bufnr = 0 })
+  -- Normalize & resolve paths early
+  old_abs = norm_path(realpath(old_abs) or old_abs)
+  new_abs = norm_path(realpath(new_abs) or new_abs)
+
+  -- Make sure the source file is visible to the TS server
+  ensure_buf_loaded_for_path(old_abs)
+  -- Give LSP a brief moment to attach if it wasn't yet
+  wait_clients_for_path(old_abs, 800)
+
+  local params = {
+    files = { { oldUri = vim.uri_from_fname(old_abs), newUri = vim.uri_from_fname(new_abs) } }
+  }
+
+  local touched, any, pending = {}, false, 0
+
+  -- Prefer clients whose root includes the file; fallback to all clients
+  local clients = clients_for_path(old_abs)
+  if #clients == 0 then clients = vim.lsp.get_clients() or {} end
+
   if #clients == 0 then
-    log("No LSP clients attached to this buffer")
+    log("No LSP clients available")
+    return done(false, touched)
+  end
+
+  for _, c in ipairs(clients) do
+    if c.supports_method and c:supports_method("workspace/willRenameFiles") then
+      any, pending = true, pending + 1
+      c.request("workspace/willRenameFiles", params, function(_err, res)
+        if res then
+          if cfg.silent_apply then
+            local bufs = apply_silent(res, cfg.encoding)
+            vim.list_extend(touched, bufs)
+          else
+            -- builtin apply: open buffers first so we can save later
+            for _, uri in ipairs(uris_from_edit(res)) do
+              table.insert(touched, vim.uri_to_bufnr(uri))
+            end
+            vim.lsp.util.apply_workspace_edit(res, cfg.encoding)
+          end
+        end
+        pending = pending - 1
+        if pending == 0 then done(true, touched) end
+      end)
+    end
+  end
+
+  if not any then
+    log("No client handled workspace/willRenameFiles")
+    done(false, touched)
+  end
+end
+
+local function will_rename(old_abs, new_abs, done)
+  preload_plugins()
+
+  -- Normalize & resolve paths early
+  old_abs = norm_path(realpath(old_abs) or old_abs)
+  new_abs = norm_path(realpath(new_abs) or new_abs)
+
+  -- Make sure the source file is visible to the TS server
+  ensure_buf_loaded_for_path(old_abs)
+  -- Give LSP a brief moment to attach if it wasn't yet
+  wait_clients_for_path(old_abs, 800)
+
+  local params = {
+    files = { { oldUri = vim.uri_from_fname(old_abs), newUri = vim.uri_from_fname(new_abs) } }
+  }
+
+  local touched, any, pending = {}, false, 0
+
+  -- Prefer clients whose root includes the file; fallback to all clients
+  local clients = clients_for_path(old_abs)
+  if #clients == 0 then clients = vim.lsp.get_clients() or {} end
+
+  if #clients == 0 then
+    log("No LSP clients available")
     return done(false, touched)
   end
 
@@ -169,8 +327,8 @@ function M.rename()
 
     -- root guard (monorepos)
     if cfg.respect_root and cfg.respect_root ~= false then
-      local c = (vim.lsp.get_clients({ bufnr = 0 }) or {})[1]
-      local root = c and c.config and c.config.root_dir and norm_path(c.config.root_dir) or nil
+      local rel = clients_for_path(old_abs)[1]
+      local root = rel and rel.config and rel.config.root_dir and norm_path(rel.config.root_dir) or nil
       if root and not vim.startswith(new_abs, root) then
         local msg = ("New path is outside LSP root: %s"):format(root)
         vim.schedule(function()
@@ -215,6 +373,63 @@ function M.rename()
         log("RENAMED:", ok and "true" or "false", "→", new_abs)
       end
     end)
+  end)
+end
+
+--- Non-interactive rename with absolute paths (used by integrations)
+---@param old_abs string
+---@param new_abs string
+function M.rename_paths(old_abs, new_abs)
+  old_abs, new_abs = (old_abs or ""), (new_abs or "")
+  old_abs, new_abs = old_abs ~= "" and old_abs or vim.api.nvim_buf_get_name(0), new_abs
+  if old_abs == "" or new_abs == "" then return end
+
+  old_abs, new_abs = norm_path(old_abs), norm_path(new_abs)
+  if new_abs == old_abs then return end
+
+  will_rename(old_abs, new_abs, function(had_handler, touched)
+    -- no in-place buffer switch here: we’re renaming from tree, not current buf
+    vim.fn.mkdir(vim.fn.fnamemodify(new_abs, ":h"), "p")
+    local ok = (vim.fn.rename(old_abs, new_abs) == 0)
+
+    if cfg.notify_did_rename and had_handler then
+      local files = { { oldUri = vim.uri_from_fname(old_abs), newUri = vim.uri_from_fname(new_abs) } }
+      for _, cl in ipairs(vim.lsp.get_clients()) do
+        if cl.supports_method and cl:supports_method("workspace/didRenameFiles") then
+          cl.notify("workspace/didRenameFiles", { files = files })
+        end
+      end
+    end
+
+    autosave_and_cleanup(touched)
+    log("RENAMED:", ok and "true" or "false", "→", new_abs)
+  end)
+end
+
+--- Interactive rename for an arbitrary file path (prompt seeded with that path)
+---@param seed_path string absolute path of the selected file
+function M.rename_for_path(seed_path)
+  local old = norm_path(seed_path or "")
+  if old == "" then return end
+
+  local function prompt(cb)
+    if vim.ui and vim.ui.input then
+      vim.ui.input({ prompt = "New path: ", default = old }, cb)
+    else
+      cb(vim.fn.input("New path: ", old))
+    end
+  end
+
+  prompt(function(new)
+    if not new or new == "" then return end
+    local new_abs = new
+    local st = vim.loop.fs_stat(new_abs)
+    if (st and st.type == "directory") or new_abs:match("[/\\]$") then
+      new_abs = join(new_abs, vim.fn.fnamemodify(old, ":t"))
+    end
+    new_abs = norm_path(new_abs)
+    if new_abs == old then return end
+    M.rename_paths(old, new_abs)
   end)
 end
 
