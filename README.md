@@ -21,33 +21,27 @@ Fixes imports across your project without popping open a bunch of buffers.
 
 ---
 
-## Requirements
-
-* Neovim **0.8+**
-* A TS LSP that **supports** `workspace/willRenameFiles`
-  (Recommended: `pmizio/typescript-tools.nvim` + capabilities from
-  `antosha417/nvim-lsp-file-operations`.)
-
----
-
 ## Installation (lazy.nvim)
 
 ```lua
+-- nvim-ts-willrename
 {
-  "ignorantic/nvim-ts-willrename",
-  -- Optional but recommended if your client doesn’t announce fileOperations:
-  dependencies = { "antosha417/nvim-lsp-file-operations" },
-  config = function()
-    require("ts_willrename").setup({
-      -- defaults shown
-      silent_apply      = true,   -- apply edits without opening windows
-      autosave          = false,  -- write modified buffers after edits
-      wipe_unlisted     = false,  -- wipe unlisted buffers after saving
-      notify_did_rename = true,   -- send workspace/didRenameFiles
-      respect_root      = true,   -- warn if new path is outside LSP root
-      encoding          = "utf-16",
-    })
-  end,
+  "<your-username>/nvim-ts-willrename",
+  main = "ts_willrename",  -- so `require("ts_willrename")` auto-loads
+  cmd = { "TSWillRename" }, -- optional
+  keys = {
+    { "<leader>mm", function() require("ts_willrename").rename() end,
+      desc = "TS: rename file (fix imports)" },
+  },
+  opts = {
+    silent_apply  = true,   -- apply edits without opening windows
+    autosave      = true,   -- write modified buffers
+    wipe_unlisted = true,   -- delete temp, unlisted buffers after save
+    respect_root  = "warn", -- "warn" | "error" | true(=warn) | false
+    encoding      = "utf-16",
+    -- NEW: skip edits in generated folders, etc.
+    ignore        = { "/types/", "/dist/", "/build/" },
+  },
 }
 ```
 
@@ -105,40 +99,57 @@ vim.keymap.set("n", "<leader>mm", "<cmd>TSWillRename<CR>",
 
 ## Options
 
-| Option              | Type                  | Default    | Description                                                                                           |
-| ------------------- | --------------------- | ---------- | ----------------------------------------------------------------------------------------------------- |
-| `silent_apply`      | boolean               | `true`     | Apply LSP edits without opening windows; affected buffers are loaded unlisted and not shown in `:ls`. |
-| `autosave`          | boolean               | `false`    | Automatically `:write` modified normal buffers after edits.                                           |
-| `wipe_unlisted`     | boolean               | `false`    | Wipe unlisted temp buffers after saving (frees memory / keeps buffer list clean).                     |
-| `notify_did_rename` | boolean               | `true`     | Notify clients with `workspace/didRenameFiles` after a successful rename.                             |
-| `respect_root`      | boolean               | `true`     | Warn if the target path is outside the current LSP root (helpful in monorepos).                       |
-| `encoding`          | `"utf-16"`\|`"utf-8"` | `"utf-16"` | Position encoding used by TS edits (TS uses UTF-16).                                                  |
+```lua
+require("ts_willrename").setup({
+  silent_apply      = true,     -- use silent workspace edit applier
+  autosave          = true,     -- write modified buffers after edits
+  wipe_unlisted     = true,     -- wipe temp, unlisted buffers that are clean
+  notify_did_rename = true,     -- send workspace/didRenameFiles when supported
+  respect_root      = "warn",   -- "warn" | "error" | true(=warn) | false
+  encoding          = "utf-16", -- encoding for LSP edits
+  debug             = false,    -- log willRename flow to :messages
+
+  -- NEW: ignore edits for matching paths.
+  -- Items can be plain substrings (fast) or predicates (path -> boolean).
+  ignore            = {
+    "/types/", "/dist/", "/build/",
+    -- function(p) return p:match("%.d%.ts$") ~= nil end, -- example: ignore *.d.ts
+  },
+})
+```
+
+### Ignoring generated folders
+
+If your build generates artifacts (e.g. types/**, dist/**), you probably
+don’t want import updates written there. Set ignore so WorkspaceEdit entries
+targeting those paths are dropped. Notes:
+
+* Paths are normalized internally (C:/.../path with forward slashes),
+so write patterns with / (not \) even on Windows.
+
+* Predicates receive an absolute normalized path.
+
+Examples:
+
+```lua
+-- simple substrings
+ignore = { "/types/", "/dist/", "/build/" }
+
+-- mix substrings & predicates
+ignore = {
+  "/dist/",
+  function(p) return p:match("%.d%.ts$") ~= nil end,  -- ignore declaration files
+}
+```
 
 ---
 
-## Commands
+## Requirements
 
-* `:TSWillRename` – Interactive rename for the **current** file (prompts for new path).
-
----
-
-## Monorepo tips
-
-* Keep renames **inside** the active client’s root (`:LspInfo` → `Root directory`).
-  Cross-package renames may not produce edits if the other package isn’t part of the same TS project.
-* Prefer **Project References** (`composite: true`, `references: [...]`) so the server “sees” dependent packages.
-* If you must rename across roots, disable `respect_root` or attach an LSP at monorepo root.
-
----
-
-## Troubleshooting
-
-* **“No client handled `workspace/willRenameFiles`”**
-  Your TS client doesn’t advertise fileOperations. Merge capabilities (see **Setup**) or set them manually.
-* **Edits apply but buffers pop up**
-  Ensure `silent_apply = true`. If some plugin still opens windows via autocmds, file an issue with details.
-* **Old buffer remains / new file opens separately**
-  This plugin renames the **current buffer in place**. If you still see the old buffer, check for custom autocmds or save-hooks that reopen files.
+* Neovim **0.8+**
+* A TS LSP that **supports** `workspace/willRenameFiles`
+  (Recommended: `pmizio/typescript-tools.nvim` + capabilities from
+  `antosha417/nvim-lsp-file-operations`.)
 
 ---
 
@@ -201,11 +212,24 @@ nvim --headless -u tests/minimal_init.lua \
 
 ---
 
-## License
+## Troubleshooting
 
-MIT. See [LICENSE](./LICENSE).
+* No import updates: ensure your TS LSP supports workspace/willRenameFiles
+and is attached to the project. Opening a TS file once or using the nvim-tree
+integration fixes this.
+
+* Edits still appear in generated output: check that ignore patterns use
+forward slashes and include the relevant segment (e.g. "/types/").
+
+* “New path is outside LSP root”: adjust respect_root or rename within the
+server’s root_dir.
+
+* require("ts_willrename") doesn’t load: set main = "ts_willrename" in
+the plugin spec.
 
 ---
 
-If you want, tell me your GitHub username and repo name and I’ll tailor the install snippet (`"ignorantic/nvim-ts-willrename"`) and add a short badge block.
+## License
+
+MIT. See [LICENSE](./LICENSE).
 
