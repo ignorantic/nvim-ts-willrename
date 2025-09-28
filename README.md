@@ -165,6 +165,39 @@ Bind TS-aware rename to `r` in nvim-tree:
     return opts
   end,
 }
+```
+
+---
+
+## Development & Tests (with `just`)
+
+This repo includes **plenary+busted** integration tests and a cross-platform `Justfile`.
+
+### Justfile usage
+
+```sh
+just test        # run all specs
+just test-file tests/ts_willrename_rename_paths_spec.lua
+```
+
+It runs Neovim headless with `tests/minimal_init.lua` and executes:
+
+* `PlenaryBustedDirectory tests/`
+* or `PlenaryBustedFile <spec>`
+
+Override Neovim path if needed:
+
+```sh
+NVIM="/path/to/nvim" just test
+```
+
+### Manual run (without just)
+
+```sh
+nvim --headless -u tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory tests/" \
+  -c "qa!"
+```
 
 ---
 
