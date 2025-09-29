@@ -1,16 +1,15 @@
--- Put the plugin under test on runtimepath
-vim.opt.runtimepath:prepend(vim.fn.fnamemodify(".", ":p"))
+local root = vim.fn.getcwd()
+vim.opt.runtimepath:append(root)
+package.path = table.concat({
+  root .. "/lua/?.lua",
+  root .. "/lua/?/init.lua",
+  package.path,
+}, ";")
 
--- Add plenary to runtimepath (fetch if missing)
-local lazypath = vim.fn.stdpath("data") .. "/lazy/plenary.nvim"
-if not vim.loop.fs_stat(lazypath) then
-  vim.fn.system({ "git", "clone", "https://github.com/nvim-lua/plenary.nvim", lazypath })
+local plenary = root .. "/tests/plenary"
+if vim.fn.isdirectory(plenary) == 1 then
+  vim.opt.runtimepath:append(plenary)
 end
-vim.opt.runtimepath:append(lazypath)
 
--- Make vim.notify visible in headless mode
-vim.notify = function(msg, level)
-  local lvl = ({ [vim.log.levels.ERROR]="ERROR", [vim.log.levels.WARN]="WARN", [vim.log.levels.INFO]="INFO" })[level] or "INFO"
-  print(("NOTIFY[%s] %s"):format(lvl, msg))
-end
+vim.cmd("filetype off | syntax off")
 

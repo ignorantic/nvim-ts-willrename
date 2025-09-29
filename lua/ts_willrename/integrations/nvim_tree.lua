@@ -59,7 +59,6 @@ function M.attach(opts)
         return api.fs.rename()
       end
 
-      print("Set key!!!")
       wr.rename_for_path(path)
 
       -- Slight delay to allow FS operations to complete, then refresh the tree

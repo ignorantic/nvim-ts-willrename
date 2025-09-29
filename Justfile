@@ -1,15 +1,16 @@
-# No need for top-level if/shell switching
+# Justfile
+NVIM := "nvim"
+INIT := "tests/minimal_init.lua"
 
-NVIM := env("NVIM", "nvim")
-MIN  := "tests/minimal_init.lua"
+# Clone test deps if missing (Plenary + LuaCov)
+test-setup:
+	@if [ ! -d tests/plenary ]; then git clone --depth=1 https://github.com/nvim-lua/plenary.nvim tests/plenary; fi
 
-# Run all tests (PlenaryBustedDirectory doesn't need extra options
-# if Neovim is already started with -u tests/minimal_init.lua)
-test:
-    {{NVIM}} --headless -u {{MIN}} -c "PlenaryBustedDirectory tests/" -c "qa!"
+# Run all specs
+test: test-setup
+  {{NVIM}} --headless -u tests/minimal_init.lua -c "lua dofile('tests/run_busted.lua')" -c "qa!"
 
-# Run a single test file
-# usage: just test-file tests/ts_willrename_rename_paths_spec.lua
-test-file FILE:
-    {{NVIM}} --headless -u {{MIN}} -c "PlenaryBustedFile {{FILE}}" -c "qa!"
+# Run single spec: just test-file tests/spec/filter_spec.lua
+test-file FILE: test-setup
+	{{NVIM}} --headless -u {{INIT}} -c "lua require('plenary.busted').run('{{FILE}}')" -c "qa!"
 
